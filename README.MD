@@ -23,6 +23,17 @@ books.toscrape.com across 50 pages and outputs a clean, analysis-ready CSV.
 
 ---
 
+## Sample Results
+
+| Title | Price  | Rating  |
+|-------|-----------|------------|
+| A Light in the Attic | 51.77 | 3 |
+| Tipping the Velvet | 53.74 | 1 |
+| Soumission | 50.10 | 1 |
+| Sharp Objects | 47.82 | 4 |
+
+---
+
 ##  Built With
 - Python 3.13
 - Requests — HTTP requests
