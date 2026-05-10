@@ -1,78 +1,161 @@
 import requests
 from bs4 import BeautifulSoup
 import csv
+import json
 import time
+import os
 
+# ─────────────────────────────────────────
+# Site Configurations
+# ─────────────────────────────────────────
+SITES = {
+    "books": {
+        "start_url": "https://books.toscrape.com/catalogue/page-1.html",
+        "pagination": "https://books.toscrape.com/catalogue/page-{page}.html",
+        "item_selector": "article.product_pod",
+        "fields": {
+            "title":  {"selector": "h3 a",          "attr": "title"},
+            "price":  {"selector": "p.price_color", "attr": None},
+            "rating": {"selector": "p.star-rating", "attr": "class"},
+        }
+    }
+}
 
-# -- Config --
-BASE_URL = "https://books.toscrape.com/catalogue/"
-START_URL = "https://books.toscrape.com/catalogue/page-1.html"
+# ─────────────────────────────────────────
+# Config
+# ─────────────────────────────────────────
+OUTPUT_FORMAT = "csv"   # "csv" or "json"
+MAX_RETRIES   = 3
+DELAY         = 1       # seconds between requests
 
-
-#Fetch Page 
-def fetch_page(url):
-    response = requests.get(url)
-    if response.status_code == 200:
-        return BeautifulSoup(response.text, "html.parser")
-    else:
-        print(f"Failed to fetch:  {url}")
-        return None
-    
-# -- Scrape Books --
 RATING_MAP = {
     "One": 1, "Two": 2, "Three": 3, "Four": 4, "Five": 5
 }
 
-def scrape_books(soup):
-    books = []
-    for book in soup.select("article.product_pod"):
-        title  = book.select_one("h3 a")["title"]
-        price  = book.select_one("p.price_color").text.strip().replace("Â", "").replace("£", "").strip()
-        rating = RATING_MAP.get(book.select_one("p.star-rating")["class"][1], 0)
-        books.append({
-            "title":  title,
-            "price":  float(price),
-            "rating": rating
-        })
-    return books
+# ─────────────────────────────────────────
+# Fetch Page
+# ─────────────────────────────────────────
+def fetch_page(url):
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                return BeautifulSoup(response.text, "html.parser")
+            elif response.status_code == 404:
+                return None
+            else:
+                print(f"  Attempt {attempt}: HTTP {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"  Attempt {attempt}: {e}")
+        time.sleep(DELAY * attempt)
+    print(f"  Failed after {MAX_RETRIES} attempts: {url}")
+    return None
 
-# -- Scrape All Pages --
-def scrape_all_pages():
-    all_books = []
+# ─────────────────────────────────────────
+# Field Extractor
+# ─────────────────────────────────────────
+def extract_field(item, field_name, config):
+    try:
+        el = item.select_one(config["selector"])
+        if el is None:
+            return None
+
+        if field_name == "price":
+            raw = el.text.strip()
+            return float(''.join(c for c in raw if c.isdigit() or c == '.'))
+
+        if field_name == "rating":
+            word = el["class"][1] if "class" in el.attrs else None
+            return RATING_MAP.get(word, 0)
+
+        if config["attr"]:
+            return el[config["attr"]].strip()
+
+        return el.text.strip()
+
+    except Exception as e:
+        print(f"  Field '{field_name}' extraction error: {e}")
+        return None
+
+# ─────────────────────────────────────────
+# Scrape Page
+# ─────────────────────────────────────────
+def scrape_page(soup, site_config):
+    items = []
+    for item in soup.select(site_config["item_selector"]):
+        record = {}
+        for field_name, field_config in site_config["fields"].items():
+            record[field_name] = extract_field(item, field_name, field_config)
+        if any(v is not None for v in record.values()):
+            items.append(record)
+    return items
+
+# ─────────────────────────────────────────
+# Scrape All Pages
+# ─────────────────────────────────────────
+def scrape_site(site_name, site_config):
+    print(f"\n{'='*50}")
+    print(f"Scraping: {site_name}")
+    print(f"{'='*50}")
+
+    all_items = []
     page = 1
 
     while True:
-        url  = f"{BASE_URL}page-{page}.html"
-        print(f"Scraping page {page}...")
+        url  = site_config["pagination"].format(page=page)
+        print(f"  Page {page}: {url}")
         soup = fetch_page(url)
 
         if soup is None:
             break
 
-        page_books = scrape_books(soup)
+        page_items = scrape_page(soup, site_config)
 
-        if not page_books:
+        if not page_items:
             break
 
-        all_books.extend(page_books)
+        all_items.extend(page_items)
+        print(f"  {len(page_items)} items collected.")
         page += 1
-        time.sleep(1)
+        time.sleep(DELAY)
 
-    print(f"Done! Scraped {len(all_books)} books total.")
-    return all_books
+    print(f"  Total: {len(all_items)} items scraped from {site_name}.")
+    return all_items
 
+# ─────────────────────────────────────────
+# Save Output
+# ─────────────────────────────────────────
+def save_output(site_name, items, fmt="csv"):
+    if not items:
+        print(f"  No data to save for {site_name}.")
+        return
 
-#-- Save to CSV --
-def save_to_csv(books):
-    filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), "books.csv")
-    with open(filename, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["title", "price", "rating"])
-        writer.writeheader()
-        writer.writerows(books)
-    print(f"Saved. {len(books)} books to books.csv")
+    base     = os.path.dirname(os.path.abspath(__file__))
+    filename = f"{site_name}_data.{fmt}"
+    path     = os.path.join(base, filename)
 
+    if fmt == "json":
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(items, f, indent=2, ensure_ascii=False)
+    else:
+        fieldnames = list(items[0].keys())
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(items)
 
-#-- Run -- 
-import os
-books = scrape_all_pages()
-save_to_csv(books)
+    print(f"  Saved: {path} ({len(items)} records)")
+
+# ─────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────
+if __name__ == "__main__":
+    total = 0
+    for site_name, site_config in SITES.items():
+        items = scrape_site(site_name, site_config)
+        save_output(site_name, items, fmt=OUTPUT_FORMAT)
+        total += len(items)
+
+    print(f"\n{'='*50}")
+    print(f"Done. {total} total records scraped.")
+    print(f"{'='*50}")
